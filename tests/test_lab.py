@@ -1,11 +1,9 @@
-import random
 from types import SimpleNamespace
 
 import pytest
 
 from planning_lab.algorithms import (
     Environment,
-    deterministic_checks,
     execute_plan,
     final_output,
     flatten_lats_tree,
@@ -17,7 +15,7 @@ from planning_lab.algorithms.decomposition import GeneratedPlan
 from planning_lab.algorithms.dynamic_decomposition import DynamicDecision
 from planning_lab.algorithms.lats import LATSActionBatch, ValueEstimate
 from planning_lab.algorithms.tree_of_thoughts import ThoughtCandidates, ThoughtEvaluation
-from langchain_mistralai import ChatMistralAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 
 class RecordingLLM:
@@ -73,11 +71,6 @@ def test_executor_passes_dependency_outputs():
     assert final_output(plan, outputs) == outputs["b"]
 
 
-def test_grounded_checks_are_deterministic():
-    issues = deterministic_checks("Design a phishing awareness workshop", "Too short")
-    assert len(issues) >= 2
-
-
 def good_deliverable() -> str:
     body = " ".join(["security checklist explains structured controls and verification"] * 14)
     return f"# Security Checklist\n- {body}"
@@ -91,11 +84,14 @@ class SequencedEnvironment:
         return next(self.feedback)
 
 
-def test_random_environment_tends_toward_good_evaluations():
-    environment = Environment(rng=random.Random(42))
-    feedback = [environment.evaluate("Any candidate") for _ in range(1_000)]
-    assert sum(item.score for item in feedback) / len(feedback) > 0.65
-    assert sum(item.success for item in feedback) / len(feedback) > 0.65
+def test_environment_delegates_to_injected_grounded_validator():
+    expected = EnvironmentFeedback(
+        success=False,
+        score=0.0,
+        details=["Missing disclosure evidence."],
+    )
+    environment = Environment(lambda candidate: expected)
+    assert environment.evaluate("RELEASE the ECU remap") == expected
 
 
 class ReflexionLLM:
@@ -105,30 +101,30 @@ class ReflexionLLM:
 
     def invoke(self, messages, **kwargs):
         system, prompt = messages[0][1], messages[-1][1]
-        if "acting agent" in system:
+        if "Torque-Tune planning agent" in system:
             self.acting_calls += 1
             if self.acting_calls == 1:
-                return SimpleNamespace(content="A short security answer.")
-            self.second_trial_saw_memory = "I omitted structure" in prompt
-            return SimpleNamespace(content=good_deliverable())
+                return SimpleNamespace(content="Decision: RELEASE\nCreate invoice now.")
+            self.second_trial_saw_memory = "I must verify disclosure" in prompt
+            return SimpleNamespace(content="Decision: HOLD\n1. Request disclosure.\n2. Escalate to shift lead.")
         return SimpleNamespace(
-            content="I omitted structure and detail; next time I will add a checklist and verification steps."
+            content="I must verify disclosure before RELEASE and avoid invoicing while the job is on hold."
         )
 
 
 def test_reflexion_retries_with_bounded_memory():
     llm = ReflexionLLM()
     environment = SequencedEnvironment([
-        EnvironmentFeedback(success=False, score=0.3, details=["Random rejection."]),
+        EnvironmentFeedback(success=False, score=0.3, details=["Missing disclosure evidence."]),
         EnvironmentFeedback(success=True, score=0.9),
     ])
     result = reflexion(
-        "Create a structured security checklist", llm, environment, max_trials=2, memory_size=1
+        "Release or hold an emissions-affecting modification", llm, environment, max_trials=2, memory_size=1
     )
     assert result.success is True
     assert len(result.trials) == 2
     assert result.trials[0].feedback.success is False
-    assert result.trials[0].reflection.startswith("I omitted")
+    assert result.trials[0].reflection.startswith("I must verify disclosure")
     assert llm.second_trial_saw_memory is True
     assert len(result.memory) == 1
 
@@ -188,7 +184,10 @@ def test_lats_uses_external_feedback_reflection_and_backpropagation():
     "schema",
     [GeneratedPlan, DynamicDecision, ThoughtCandidates, ThoughtEvaluation, LATSActionBatch, ValueEstimate],
 )
-def test_structured_schemas_bind_with_langchain_mistral(schema):
-    chat = ChatMistralAI(api_key="test-key", model="test-model")
+def test_structured_schemas_bind_with_langchain_gemini(schema):
+    chat = ChatGoogleGenerativeAI(
+        google_api_key="test-key",
+        model="gemini-2.0-flash",
+    )
     runnable = chat.with_structured_output(schema, method="json_schema")
     assert runnable is not None
