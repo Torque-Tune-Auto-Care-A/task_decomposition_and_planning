@@ -1,24 +1,22 @@
-import random
+from __future__ import annotations
+
+from collections.abc import Callable
 
 from ..models import EnvironmentFeedback
 
+CandidateValidator = Callable[[str], EnvironmentFeedback]
+
 
 class Environment:
-    """A stochastic evaluator biased toward favorable results."""
+    """
+    Generic adapter for real external feedback.
 
-    def __init__(
-        self,
-        success_threshold: float = 0.6,
-        rng: random.Random | None = None,
-    ):
-        if not 0.0 <= success_threshold <= 1.0:
-            raise ValueError("success_threshold must be between zero and one")
-        self.success_threshold = success_threshold
-        self.rng = rng or random.Random()
+    The Torque-Tune project supplies the validator in `planning/torque_tune_environment.py`. It will validate a
+    candidate plan using MCP results, SQLite evidence, and compliance rules.
+    """
 
-    def evaluate(self, state: str) -> EnvironmentFeedback:
-        del state  # This evaluator intentionally ignores the candidate contents.
-        score = round(self.rng.betavariate(5.0, 2.0), 4)
-        success = score >= self.success_threshold
-        details = [] if success else ["The randomized evaluator rejected this attempt."]
-        return EnvironmentFeedback(success=success, score=score, details=details)
+    def __init__(self, validator: CandidateValidator) -> None:
+        self._validator = validator
+
+    def evaluate(self, candidate_plan: str) -> EnvironmentFeedback:
+        return self._validator(candidate_plan)
