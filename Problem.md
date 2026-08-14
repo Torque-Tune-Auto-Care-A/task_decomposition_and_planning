@@ -1,95 +1,114 @@
 # Torque-Tune Planning Agent
 
-## Master Business Problem
+## Goal
 
-### High-Risk Multi-Stage Performance Tuning & Compliance Resolution
+Build a Planning Agent that reviews high-risk tuning jobs and decides
+whether the job should be:
 
-Torque-Tune is a performance and tuning garage chain where front-desk staff and technicians handle requests involving vehicle tuning, previous work, appointments, performance goals, budgets, warranty considerations, and compliance-sensitive modifications.
+-   **RELEASE** --- safe to proceed.
+-   **HOLD** --- required evidence is missing.
+-   **ESCALATE** --- shift-lead review or customer confirmation is
+    required.
 
-The goal of this project is to build a **Planning Agent** capable of handling complex tuning requests that cannot be safely resolved through a single LLM turn or a single MCP tool call.
+## Business Problem
 
-A typical request may look like:
+A request such as:
 
-> "I want to improve my car's performance using a setup similar to the previous tuning, keep it within my budget, and let me know if the requested modifications could affect the warranty or compliance."
+> "Review this ECU remap and decat job and decide whether it can be
+> released."
 
-Resolving this request requires the agent to identify the correct client and vehicle, review tuning history and appointments, understand the requested modifications, evaluate the relevant constraints, select an appropriate work plan, execute the required operations through MCP tools, and validate the final state before committing consequential database changes.
+requires multiple checks before any consequential database write.
 
-The key challenge is that **the result of one step can change what should happen next**. For example, discovering that a client owns multiple vehicles may require additional disambiguation, while discovering previous modifications may introduce additional compliance requirements or make the original plan unsuitable.
+The agent must verify:
 
----
+-   Client and vehicle identity
+-   Previous tuning history
+-   Appointment
+-   Technician identity and authorization
+-   Compliance and warranty requirements
+-   Required disclosure/sign-off
 
-## Why This Is a Planning Problem
+The MCP server provides small tools for these operations, but there is
+no single `release_modification_job()` tool. Therefore, the agent must
+plan and orchestrate the steps.
 
-The MCP server intentionally provides narrow tools for individual operations, such as:
+## Planning Approaches
 
-- Finding a client.
-- Identifying a vehicle.
-- Retrieving tuning history.
-- Checking appointments.
-- Checking technician information.
-- Logging completed work.
-- Creating invoices.
+### 1. Decomposition-First
 
-There is no single high-level operation such as `complete_tuning_request()`.
+Generate the complete task graph first, then execute it in topological
+order.
 
-The Planning Agent must therefore orchestrate these tools and reason about their dependencies.
+``` text
+vehicle → history → appointment → technician → compliance → disclosure → decision
+```
 
-A complex request may require the agent to:
+### 2. Dynamic / Interleaved Decomposition
 
-1. Identify the correct client.
-2. Identify the correct vehicle.
-3. Retrieve previous tuning history.
-4. Check the relevant appointment.
-5. Interpret the requested modifications.
-6. Determine performance, budget, warranty, and compliance constraints.
-7. Generate and evaluate possible work plans.
-8. Verify required approvals or sign-offs.
-9. Execute approved operations through MCP.
-10. Validate the final state before creating the invoice.
+Execute a step, inspect the MCP/database result, and adapt the next
+steps.
 
-This makes the problem fundamentally different from a simple retrieval or memory task. The agent must decide **what to do, when to do it, and whether it is safe to proceed**.
+``` text
+vehicle → disclosure declined → HOLD / ESCALATE
+```
 
----
+All task graphs must be acyclic (DAG).
 
-## Core Business Constraints
+## Algorithm Routing
 
-The agent must balance several potentially competing objectives:
+  Task                                                     Method
+  -------------------------------------------------------- ------------------
+  Client/vehicle, history, appointment, policy checks      Plan-and-Solve
+  Compare RELEASE / HOLD / ESCALATE                        Tree of Thoughts
+  Final plan selection with MCP/DB feedback                LATS
+  Improve HOLD/ESCALATE notices                            Self-Refine
+  Retry a failed plan using previous failure information   Reflexion
 
-| Constraint | Role |
-|---|---|
-| **Performance** | Achieve the customer's requested performance improvements. |
-| **Budget** | Keep the proposed work within the customer's available budget when possible. |
-| **Warranty** | Identify modifications that may affect manufacturer warranty coverage. |
-| **Compliance** | Detect sensitive modifications that require additional verification. |
-| **Operational Constraints** | Consider appointments, technician availability, and previous vehicle work. |
-| **Safety** | Prevent invalid or unauthorized work from being recorded as completed. |
+## Grounded Validation
 
-The agent therefore cannot simply optimize for maximum performance. It must reason about the trade-offs between these constraints before selecting a plan.
+The proposed plan must be validated against real evidence from:
 
----
+-   SQLite/database
+-   MCP tool results
+-   Compliance policy
+-   Technician authentication state
 
-## Detailed Implementation Concerns
+A plan must fail if it:
 
-### 1. DAG Decomposition Methods
-The agent implements two distinct decomposition strategies against the same request type:
-- **Decomposition-First:** Generates the complete task graph upfront and executes in strict topological order.
-- **Dynamic / Interleaved Decomposition:** Evaluates intermediate tool outputs after each step, allowing early discoveries (e.g., unexpected diagnostic codes or undocumented modifications) to dynamically alter or replace downstream subtasks.
-- **Acyclicity Enforcement:** All generated task graphs are validated at construct time to ensure zero circular dependencies or potential deadlocks.
+-   Uses an unknown or ambiguous vehicle.
+-   Uses an unauthenticated or mismatched technician.
+-   Completes emissions-affecting work without successful disclosure
+    evidence.
+-   Creates an invoice before a valid release decision and successful
+    modification logging.
+-   Ignores a required HOLD or ESCALATE decision.
 
-### 2. Planning Algorithm Routing
-Subtasks are routed to specific planning algorithms based on their structural requirements:
-- **Plan-and-Solve:** Used for deterministic, single-pass operations (e.g., client lookups, historical records retrieval, simple cost summation).
-- **Tree of Thoughts (ToT):** Used for combinatorial optimization subtasks with competing constraints (e.g., balancing ECU remap stages, budget limits, and emissions compliance).
-- **Language Agent Tree Search (LATS):** Used for parameter evaluation requiring external feedback (e.g., simulating ECU parameters against dynamic vehicle thresholds with verbal reflections on failure branches).
+An independent critic should review the proposed plan against the
+available evidence before final consequential writes.
 
-### 3. Self-Correction Scopes
-- **Self-Refine:** Applied to single-turn text outputs (e.g., drafting legal exemption disclaimers and customer notices) using explicit rubric-based evaluation.
-- **Reflexion:** Applied to complex MCP database write operations where schema or authorization constraints may cause initial failure. Maintains a capped episodic buffer of verbal reflections across trials within the run.
+## Self-Correction
 
-### 4. Grounded vs. Ungrounded Critique
-To eliminate self-evaluation bias:
-- **Grounded Critique Sources:** Hard database schema checks, strict emissions compliance validator functions, and explicit technician signature presence checks serve as absolute sources of truth.
-- **Independent Critic:** An isolated model instance reviews compliance logs and authorization state before final transaction commitment.
+-   **Self-Refine:** Improve single outputs such as HOLD or ESCALATE
+    notices using a defined rubric.
+-   **Reflexion:** Learn from failed release attempts and use the
+    reflection in later trials within the same run.
 
-### 5. Benchmark & Evaluation Matrix
-The system is evaluated across a standardized test suite comparing Accuracy, LLM Calls, Token Consumption, and Latency across all planning, decomposition, and critique modalities.
+## Evaluation
+
+Use a fixed test suite to compare:
+
+-   Decomposition-First vs Dynamic Decomposition
+-   Plan-and-Solve
+-   Tree of Thoughts
+-   LATS
+-   Self-Refine
+-   Reflexion
+-   Grounded vs Ungrounded Critique
+
+Measure:
+
+-   Task success / accuracy
+-   LLM calls
+-   Token consumption
+-   Latency
+-   Estimated cost
