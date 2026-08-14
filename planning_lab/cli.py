@@ -1,16 +1,16 @@
 from __future__ import annotations
-
 import argparse
+import asyncio
 import json
 import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from .algorithms import (
+    Environment,
     decompose_goal,
     dynamic_decomposition,
     execute_plan,
@@ -18,23 +18,25 @@ from .algorithms import (
     flatten_lats_tree,
     lats,
     plan_and_solve,
-    reflexion,
     reflect_and_refine,
-    Environment,
+    reflexion,
     tree_of_thoughts,
 )
-
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from agent.client import TorqueTuneAgent
+from agent.config import load_config
 from planning.torque_tune_environment import PlanningContext, TorqueTuneEnvironment
 
 
 def parser() -> argparse.ArgumentParser:
-    cli = argparse.ArgumentParser(description="Week 4: decomposition, planning, and reflection lab")
+    cli = argparse.ArgumentParser(
+        description="Week 4: decomposition, planning, and reflection lab"
+    )
     cli.add_argument(
         "goal",
         nargs="?",
@@ -72,7 +74,7 @@ def save_artifact(payload: dict) -> Path:
     return path
 
 
-def main() -> None:
+async def main() -> None:
     # Models may return arrows, em dashes, or other characters that Windows'
     # legacy cp1252 console cannot encode. UTF-8 keeps CLI output portable.
     if hasattr(sys.stdout, "reconfigure"):
@@ -107,7 +109,12 @@ def main() -> None:
     if args.mode == "dag":
         plan = decompose_goal(args.goal, llm)
         print("Execution batches:", plan.execution_batches())
-        outputs = execute_plan(plan, llm)
+        async with TorqueTuneAgent(load_config()) as agent:
+            outputs = await execute_plan(
+                plan,
+                llm,
+                pipeline=agent.memory,
+            )
         draft = final_output(plan, outputs)
         reflection = (
             reflect_and_refine(args.goal, draft, llm, environment)
@@ -123,8 +130,33 @@ def main() -> None:
                 "revised": reflection.revised != reflection.draft,
             }
     elif args.mode == "dynamic":
-        history = dynamic_decomposition(args.goal, llm)
-        result = history[-1][1] if history else "Planner reported the goal was already complete."
+        async with TorqueTuneAgent(load_config()) as agent:
+
+            async def project_executor(task: str) -> str:
+                return await agent.run_turn(
+                    f"""Work on one step of an automotive-service goal.
+
+Overall goal:
+{args.goal}
+
+Current task:
+{task}
+
+Use MCP tools, scoped memory, and grounded knowledge-base evidence when needed.
+Do not invent vehicle facts, policies, or technical specifications."""
+                )
+
+            history = await dynamic_decomposition(
+                args.goal,
+                llm,
+                executor=project_executor,
+            )
+
+        result = (
+            history[-1][1]
+            if history
+            else "Planner reported the goal was already complete."
+        )
         payload.update(history=history, result=result)
     elif args.mode == "ps":
         result = plan_and_solve(args.goal, llm)
@@ -167,4 +199,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
