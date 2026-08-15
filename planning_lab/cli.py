@@ -23,6 +23,28 @@ from .algorithms import (
     tree_of_thoughts,
 )
 
+class _TextNormalizingLLM:
+    """Gemini 3.x may return content as a list of parts; algorithms expect str."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    @staticmethod
+    def _normalize(out):
+        content = getattr(out, "content", "")
+        if isinstance(content, list):
+            out.content = "".join(
+                item.get("text", "") if isinstance(item, dict) else str(item)
+                for item in content
+            )
+        return out
+
+    def invoke(self, messages, **kw):
+        return self._normalize(self._inner.invoke(messages, **kw))
+
+    def with_structured_output(self, schema, *, method):
+        return self._inner.with_structured_output(schema, method=method)
+    
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -47,7 +69,7 @@ def parser() -> argparse.ArgumentParser:
         choices=["dag", "dynamic", "ps", "tot", "reflexion", "lats"],
         default="dag",
     )
-    cli.add_argument("--model", default=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"))
+    cli.add_argument("--model", default=os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite"))
     cli.add_argument("--client-id", type=int, default=2)
     cli.add_argument("--vehicle-id", type=int, default=3)
     cli.add_argument("--tech-id", type=int, default=2)
@@ -84,12 +106,12 @@ async def main() -> None:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is missing in the project .env")
-    llm = ChatGoogleGenerativeAI(
+    llm = _TextNormalizingLLM(ChatGoogleGenerativeAI(
         google_api_key=api_key,
         model=args.model,
         temperature=0.2,
         max_retries=2,
-    )
+    ))
     environment = Environment(
         TorqueTuneEnvironment(
             PlanningContext(
