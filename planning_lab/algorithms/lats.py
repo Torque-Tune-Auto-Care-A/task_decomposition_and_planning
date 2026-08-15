@@ -6,9 +6,8 @@ from dataclasses import dataclass, field
 from langchain_core.language_models.chat_models import BaseChatModel
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..models import EnvironmentFeedback
+from ..models import EnvironmentFeedback, PlanningRequest
 from .environment import Environment
-
 
 class LATSAction(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -184,3 +183,51 @@ def flatten_lats_tree(root: LATSNode) -> list[dict]:
         )
         queue.extend((child, node_id) for child in node.children)
     return records
+def build_lats_task(planning_request: PlanningRequest) -> str:
+    return f"""
+You are making the FINAL release decision for a high-risk Torque-Tune job.
+
+Customer request:
+{planning_request.request}
+
+Client ID: {planning_request.client_id}
+Vehicle ID: {planning_request.vehicle_id}
+Technician ID: {planning_request.tech_id}
+Appointment ID: {planning_request.appointment_id}
+
+Every candidate will be scored by EXTERNAL grounded validation
+(SQLite evidence + MCP session state + compliance policy), not by your
+own opinion of yourself.
+
+Propose complete candidate decisions. Each MUST end with exactly one of:
+Decision: RELEASE
+Decision: HOLD
+Decision: ESCALATE
+followed by safe, concrete next actions.
+
+Do not invent evidence. Do not assume a database write succeeded.
+"""
+
+
+def run_lats(
+    task_or_request: str | PlanningRequest,
+    llm: BaseChatModel,
+    environment: Environment,
+    iterations: int = 2,
+    n_actions: int = 2,
+    exploration_weight: float = 1.414,
+) -> LATSResult:
+    """Domain-adapted entry point: final-decision search scored by the grounded environment."""
+    task = (
+        build_lats_task(task_or_request)
+        if isinstance(task_or_request, PlanningRequest)
+        else task_or_request
+    )
+    return lats(
+        task,
+        llm,
+        environment,
+        iterations=iterations,
+        n_actions=n_actions,
+        exploration_weight=exploration_weight,
+    )
