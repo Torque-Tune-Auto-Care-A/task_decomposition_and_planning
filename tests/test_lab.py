@@ -43,8 +43,7 @@ def test_dag_order_and_parallel_batches():
         ],
     })
     assert plan.execution_batches() == [["research", "risks"], ["brief"]]
-    assert plan.execution_batches()[-1] == ["brief"]
-
+    assert plan.topological_order()[-1] == "brief"
 
 def test_cycle_is_rejected():
     with pytest.raises(ValueError, match="Cycle detected"):
@@ -67,22 +66,8 @@ def test_executor_passes_dependency_outputs():
     llm = RecordingLLM()
     outputs = asyncio.run(execute_plan(plan, llm))
 
-    assert "Completed Collect useful evidence" in llm.prompts[1]
+    assert "Completed Current task: Collect useful evidence" in llm.prompts[1]
     assert final_output(plan, outputs) == outputs["b"]
-
-
-# def test_executor_passes_dependency_outputs():
-#     plan = Plan.model_validate({
-#         "goal": "Create a concise combined report",
-#         "tasks": [
-#             {"id": "a", "instruction": "Collect useful evidence", "depends_on": []},
-#             {"id": "b", "instruction": "Synthesize all evidence", "depends_on": ["a"]},
-#         ],
-#     })
-#     llm = RecordingLLM()
-#     outputs = execute_plan(plan, llm)
-#     assert "Completed Current task: Collect useful evidence" in llm.prompts[1]
-#     assert final_output(plan, outputs) == outputs["b"]
 
 
 def good_deliverable() -> str:

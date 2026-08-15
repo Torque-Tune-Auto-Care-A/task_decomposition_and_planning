@@ -58,10 +58,11 @@ When done is true, use an empty string for next_task.""",
         # NEW: use the project's executor when provided
         if executor is not None:
             result = executor(task)
-        if inspect.isawaitable(result):
-            result = await result
+            if inspect.isawaitable(result):
+                result = await result
         else:
-            response = await asyncio.to_thread(llm.invoke([
+            response = await asyncio.to_thread(
+                lambda: llm.invoke([
                 (
                     "system",
                     "Execute the next adaptive sub-task using the observations provided.",
